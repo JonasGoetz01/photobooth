@@ -304,6 +304,12 @@ class PrintManager:
             logging.info("Clearing any stuck print jobs before printing...")
             self.clear_print_queue()
             
+            # Try system lp command as fallback for Canon MG3600
+            printer_name = self.config.get("printing", "printer_name")
+            if "MG3600" in printer_name:
+                logging.info("Trying system lp command for Canon MG3600...")
+                return self.print_with_lp_command(image_path, copies, printer_name)
+            
             # Check printer status before printing
             if not self.check_printer_ready():
                 logging.error("Printer is not ready for printing")
@@ -531,6 +537,49 @@ class PrintManager:
                 
         except Exception as e:
             logging.error(f"Error clearing print queue: {e}")
+            return False
+    
+    def print_with_lp_command(self, image_path, copies, printer_name):
+        """Try printing using system lp command instead of Python CUPS"""
+        try:
+            import subprocess
+            
+            # Build lp command
+            cmd = [
+                'lp',
+                '-d', printer_name,  # destination printer
+                '-n', str(copies),   # number of copies
+                '-o', 'fit-to-page', # fit to page
+                '-o', 'media=4x6',   # try 4x6 media
+                str(image_path)
+            ]
+            
+            logging.info(f"Executing lp command: {' '.join(cmd)}")
+            
+            # Execute command
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0:
+                logging.info(f"lp command succeeded: {result.stdout.strip()}")
+                # Extract job ID from output (usually "request id is Canon_MG3600_series-XX")
+                output = result.stdout.strip()
+                if "request id is" in output:
+                    job_id_str = output.split("request id is")[-1].strip()
+                    # Try to extract numeric job ID
+                    job_id = job_id_str.split('-')[-1] if '-' in job_id_str else None
+                    if job_id and job_id.isdigit():
+                        logging.info(f"Monitoring lp job {job_id}...")
+                        return self.monitor_print_job(int(job_id), printer_name)
+                return True
+            else:
+                logging.error(f"lp command failed: {result.stderr.strip()}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            logging.error("lp command timed out")
+            return False
+        except Exception as e:
+            logging.error(f"Error with lp command: {e}")
             return False
     
     def clear_specific_job(self, job_id):
