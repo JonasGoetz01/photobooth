@@ -287,6 +287,7 @@ class PrintManager:
             printer_name = self.config.get("printing", "printer_name")
             if printer_name in printers:
                 self.get_printer_capabilities(printer_name)
+                self.get_printer_media_sizes(printer_name)
             
             return True
         except Exception as e:
@@ -339,9 +340,8 @@ class PrintManager:
                 'copies': str(copies)
             }
             
-            # Only add media size if it's not the default
-            if media_size != "iso_a4_210x297mm":
-                options['media'] = media_size
+            # Skip media size for Canon MG3600 - let printer use default settings
+            # The Canon MG3600 seems to reject the standard CUPS media identifiers
             
             
             # Log the print options for debugging
@@ -455,7 +455,43 @@ class PrintManager:
                 break
         
         logging.warning(f"Job {job_id} monitoring timed out after {timeout} seconds")
-        return False
+                    return False
+    
+    def get_printer_media_sizes(self, printer_name=None):
+        """Get supported media sizes from the printer PPD"""
+        try:
+            if not printer_name:
+                printer_name = self.config.get("printing", "printer_name")
+            
+            ppd_path = self.conn.getPPD(printer_name)
+            if ppd_path:
+                logging.info(f"PPD file for {printer_name}: {ppd_path}")
+                
+                # Try to read PPD file to find supported media sizes
+                try:
+                    with open(ppd_path, 'r') as f:
+                        ppd_content = f.read()
+                    
+                    # Look for PageSize options
+                    media_sizes = []
+                    lines = ppd_content.split('\n')
+                    for line in lines:
+                        if 'PageSize' in line and '4x6' in line.lower():
+                            logging.info(f"Found 4x6 option: {line.strip()}")
+                            media_sizes.append(line.strip())
+                    
+                    if media_sizes:
+                        logging.info(f"Supported 4x6 media sizes: {media_sizes}")
+                    else:
+                        logging.info("No specific 4x6 media sizes found in PPD")
+                        
+                except Exception as e:
+                    logging.error(f"Could not read PPD file: {e}")
+            else:
+                logging.warning(f"No PPD file found for {printer_name}")
+                
+        except Exception as e:
+            logging.error(f"Error getting printer media sizes: {e}")
     
     def clear_print_queue(self, printer_name=None):
         """Clear all pending print jobs for the printer"""
