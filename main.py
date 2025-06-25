@@ -544,13 +544,15 @@ class PrintManager:
         try:
             import subprocess
             
-            # Build lp command
+            # Build lp command with correct Canon MG3600 options
             cmd = [
                 'lp',
                 '-d', printer_name,  # destination printer
                 '-n', str(copies),   # number of copies
-                '-o', 'fit-to-page', # fit to page
-                '-o', 'media=4x6',   # try 4x6 media
+                '-o', 'PageSize=4x6.Borderless',  # Use the default borderless 4x6
+                '-o', 'MediaType=Photographic',   # Use photo paper type
+                '-o', 'InputSlot=Main',            # Use main paper tray
+                '-o', 'print-scaling=fit',         # Fit to page
                 str(image_path)
             ]
             
@@ -561,15 +563,27 @@ class PrintManager:
             
             if result.returncode == 0:
                 logging.info(f"lp command succeeded: {result.stdout.strip()}")
-                # Extract job ID from output (usually "request id is Canon_MG3600_series-XX")
+                # Extract job ID from output (German: "Anfrage-ID ist Canon_MG3600_series-XX")
                 output = result.stdout.strip()
-                if "request id is" in output:
+                job_id = None
+                
+                # Try both English and German formats
+                if "request id is" in output.lower():
                     job_id_str = output.split("request id is")[-1].strip()
-                    # Try to extract numeric job ID
-                    job_id = job_id_str.split('-')[-1] if '-' in job_id_str else None
-                    if job_id and job_id.isdigit():
+                elif "anfrage-id ist" in output.lower():
+                    job_id_str = output.split("anfrage-id ist")[-1].strip()
+                else:
+                    job_id_str = output
+                
+                # Extract numeric job ID
+                if '-' in job_id_str:
+                    job_id = job_id_str.split('-')[-1].split()[0]  # Get first part after split by space
+                    if job_id.isdigit():
                         logging.info(f"Monitoring lp job {job_id}...")
                         return self.monitor_print_job(int(job_id), printer_name)
+                
+                # If we can't extract job ID, just return success
+                logging.info("Job submitted successfully, but couldn't extract job ID for monitoring")
                 return True
             else:
                 logging.error(f"lp command failed: {result.stderr.strip()}")
