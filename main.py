@@ -357,49 +357,111 @@ class PrintManager:
             job_id = self.conn.printFile(printer_name, str(image_path), "PhotoBooth", options)
             logging.info(f"Print job {job_id} submitted for {copies} copies")
             
-            # Check job status immediately after submission
-            try:
-                job_attrs = self.conn.getJobAttributes(job_id)
-                job_state = job_attrs.get('job-state', 'unknown')
-                job_state_reasons = job_attrs.get('job-state-reasons', ['unknown'])
-                logging.info(f"Job {job_id} status: {job_state}, reasons: {job_state_reasons}")
-                
-                # Decode job state for better debugging
-                state_meanings = {
-                    3: "pending",
-                    4: "held", 
-                    5: "processing-stopped",
-                    6: "canceled",
-                    7: "aborted",
-                    8: "completed"
-                }
-                state_meaning = state_meanings.get(job_state, f"unknown({job_state})")
-                logging.info(f"Job {job_id} state meaning: {state_meaning}")
-                
-                # If job is held or stopped, log detailed reason and try to get more info
-                if job_state in [4, 5, 8]:  # held, processing-stopped, aborted
-                    logging.warning(f"Print job {job_id} may have issues - state: {job_state} ({state_meaning})")
-                    logging.warning(f"Job state reasons: {job_state_reasons}")
-                    
-                    # Get more printer status info
-                    printers = self.conn.getPrinters()
-                    if printer_name in printers:
-                        printer_state = printers[printer_name].get('printer-state', 'unknown')
-                        printer_reasons = printers[printer_name].get('printer-state-reasons', ['unknown'])
-                        logging.warning(f"Printer {printer_name} state: {printer_state}, reasons: {printer_reasons}")
-                    
-                    return False  # Indicate failure for problematic states
-                    
-            except Exception as job_e:
-                logging.warning(f"Could not check job status: {job_e}")
+            # Monitor job progress for up to 30 seconds
+            success = self.monitor_print_job(job_id, printer_name)
             
-            return True
+            return success
             
         except Exception as e:
             logging.error(f"Printing failed: {e}")
             import traceback
             logging.error(f"Traceback: {traceback.format_exc()}")
             return False
+    
+    def monitor_print_job(self, job_id, printer_name, timeout=30):
+        """Monitor print job progress and diagnose issues"""
+        import time
+        
+        state_meanings = {
+            3: "pending",
+            4: "processing", 
+            5: "processing-stopped",
+            6: "canceled",
+            7: "aborted",
+            8: "completed",
+            9: "completed"
+        }
+        
+        start_time = time.time()
+        last_state = None
+        
+        while time.time() - start_time < timeout:
+            try:
+                # Check job status
+                job_attrs = self.conn.getJobAttributes(job_id)
+                job_state = job_attrs.get('job-state', 'unknown')
+                job_state_reasons = job_attrs.get('job-state-reasons', ['unknown'])
+                state_meaning = state_meanings.get(job_state, f"unknown({job_state})")
+                
+                # Only log if state changed
+                if job_state != last_state:
+                    logging.info(f"Job {job_id} status: {job_state} ({state_meaning}), reasons: {job_state_reasons}")
+                    last_state = job_state
+                
+                # Check if job completed successfully
+                if job_state in [8, 9]:  # completed
+                    logging.info(f"Print job {job_id} completed successfully!")
+                    return True
+                
+                # Check if job failed
+                if job_state in [5, 6, 7]:  # stopped, canceled, aborted
+                    logging.error(f"Print job {job_id} failed - state: {job_state} ({state_meaning})")
+                    logging.error(f"Job failure reasons: {job_state_reasons}")
+                    
+                    # Get detailed printer status
+                    printers = self.conn.getPrinters()
+                    if printer_name in printers:
+                        printer_info = printers[printer_name]
+                        printer_state = printer_info.get('printer-state', 'unknown')
+                        printer_reasons = printer_info.get('printer-state-reasons', ['unknown'])
+                        logging.error(f"Printer {printer_name} state: {printer_state}, reasons: {printer_reasons}")
+                        
+                        # Check for common issues
+                        if 'media-needed' in printer_reasons:
+                            logging.error("ISSUE: Printer needs paper - check if 4x6 paper is loaded")
+                        if 'marker-supply-low' in printer_reasons:
+                            logging.error("ISSUE: Low ink/toner")
+                        if 'marker-supply-empty' in printer_reasons:
+                            logging.error("ISSUE: Empty ink/toner cartridge")
+                        if 'door-open' in printer_reasons:
+                            logging.error("ISSUE: Printer door/cover is open")
+                        if 'media-jam' in printer_reasons:
+                            logging.error("ISSUE: Paper jam detected")
+                    
+                    return False
+                
+                # If job is stuck in pending for too long, diagnose
+                if job_state == 3 and time.time() - start_time > 10:
+                    if time.time() - start_time == 10:  # Log once after 10 seconds
+                        logging.warning(f"Job {job_id} stuck in pending state - checking printer...")
+                        
+                        # Check printer queue
+                        jobs = self.conn.getJobs(which_jobs='active')
+                        logging.info(f"Active print jobs: {len(jobs)}")
+                        for jid, job_info in jobs.items():
+                            logging.info(f"Job {jid}: {job_info.get('job-name', 'unknown')}")
+                        
+                        # Check if printer is paused
+                        printers = self.conn.getPrinters()
+                        if printer_name in printers:
+                            printer_info = printers[printer_name]
+                            printer_state = printer_info.get('printer-state', 'unknown')
+                            printer_reasons = printer_info.get('printer-state-reasons', ['unknown'])
+                            logging.warning(f"Printer {printer_name} state: {printer_state}, reasons: {printer_reasons}")
+                            
+                            if printer_state == 5:  # stopped
+                                logging.error("ISSUE: Printer is stopped/paused - check printer status")
+                            if 'paused' in printer_reasons:
+                                logging.error("ISSUE: Printer queue is paused")
+                
+                time.sleep(2)  # Check every 2 seconds
+                
+            except Exception as e:
+                logging.error(f"Error monitoring job {job_id}: {e}")
+                break
+        
+        logging.warning(f"Job {job_id} monitoring timed out after {timeout} seconds")
+        return False
     
     def get_cups_media_size(self, paper_size):
         """Convert paper size to CUPS media format"""
