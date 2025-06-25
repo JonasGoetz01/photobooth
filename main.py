@@ -544,16 +544,12 @@ class PrintManager:
         try:
             import subprocess
             
-            # Build lp command with correct Canon MG3600 options
+            # Build minimal lp command - let printer use all defaults
             cmd = [
                 'lp',
                 '-d', printer_name,  # destination printer
                 '-n', str(copies),   # number of copies
-                '-o', 'PageSize=4x6.Borderless',  # Use the default borderless 4x6
-                '-o', 'MediaType=Photographic',   # Use photo paper type
-                '-o', 'InputSlot=Main',            # Use main paper tray
-                '-o', 'print-scaling=fit',         # Fit to page
-                str(image_path)
+                str(image_path)      # just the image file
             ]
             
             logging.info(f"Executing lp command: {' '.join(cmd)}")
