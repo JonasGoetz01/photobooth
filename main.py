@@ -335,13 +335,15 @@ class PrintManager:
             #     logging.info("Canon MG3600 detected, using A4 instead of 4x6 for better compatibility")
             #     media_size = "iso_a4_210x297mm"
             
-            # Print options - simplified for better compatibility
+            # Print options - use Canon-specific 4x6 format
             options = {
                 'copies': str(copies)
             }
             
-            # Skip media size for Canon MG3600 - let printer use default settings
-            # The Canon MG3600 seems to reject the standard CUPS media identifiers
+            # Use Canon-specific page size for 4x6
+            if paper_size == "4x6" and "MG3600" in printer_name:
+                options['PageSize'] = '4x6.Borderless'  # Use Canon's borderless 4x6 format
+                logging.info("Using Canon MG3600 specific 4x6.Borderless page size")
             
             
             # Log the print options for debugging
