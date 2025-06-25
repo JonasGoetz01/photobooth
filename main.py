@@ -335,15 +335,15 @@ class PrintManager:
             #     logging.info("Canon MG3600 detected, using A4 instead of 4x6 for better compatibility")
             #     media_size = "iso_a4_210x297mm"
             
-            # Print options - use Canon-specific 4x6 format
+            # Print options - try minimal settings for Canon MG3600
             options = {
                 'copies': str(copies)
             }
             
-            # Use Canon-specific page size for 4x6
-            if paper_size == "4x6" and "MG3600" in printer_name:
-                options['PageSize'] = '4x6.Borderless'  # Use Canon's borderless 4x6 format
-                logging.info("Using Canon MG3600 specific 4x6.Borderless page size")
+            # Try different approaches for Canon MG3600
+            if "MG3600" in printer_name:
+                # First try: No page size at all - let printer auto-detect
+                logging.info("Using minimal options for Canon MG3600 - no page size specified")
             
             
             # Log the print options for debugging
@@ -1223,20 +1223,15 @@ class PhotoBoothApp:
         copies = self.create_print_dialog()
         
         if copies and copies > 0:
-            # Prepare image for printing
-            print_image = self.image_processor.prepare_for_print(self.current_photo_path)
-            if print_image:
-                # Save print-ready version
-                print_path = self.current_photo_path.parent / f"print_{self.current_photo_path.name}"
-                print_image.save(print_path, "JPEG", quality=95)
-                
-                # Send to printer
-                if self.print_manager.print_image(print_path, copies):
-                    messagebox.showinfo("Success", f"Printing {copies} copies!")
-                else:
-                    messagebox.showerror("Error", "Printing failed!")
+            # SIMPLIFIED APPROACH: Try printing the original image directly first
+            # Bypass complex image processing that might be causing issues
+            logging.info("Attempting to print original image directly (bypassing complex processing)")
+            
+            # Send original to printer directly
+            if self.print_manager.print_image(self.current_photo_path, copies):
+                messagebox.showinfo("Success", f"Printing {copies} copies!")
             else:
-                messagebox.showerror("Error", "Failed to prepare image for printing!")
+                messagebox.showerror("Error", "Printing failed!")
     
     def create_print_dialog(self):
         """Create a custom print dialog that works better on Raspberry Pi"""
