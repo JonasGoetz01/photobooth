@@ -455,7 +455,7 @@ class PrintManager:
                 break
         
         logging.warning(f"Job {job_id} monitoring timed out after {timeout} seconds")
-                    return False
+        return False
     
     def get_printer_media_sizes(self, printer_name=None):
         """Get supported media sizes from the printer PPD"""
