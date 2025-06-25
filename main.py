@@ -1004,16 +1004,10 @@ class PhotoBoothApp:
             messagebox.showerror("Error", "No photo to print!")
             return
             
-        # Ask for number of copies
-        copies = simpledialog.askinteger(
-            "Print Copies",
-            "How many copies would you like?",
-            minvalue=1,
-            maxvalue=self.config_manager.get("printing", "max_copies"),
-            initialvalue=1
-        )
+        # Create custom print dialog (better for Raspberry Pi)
+        copies = self.create_print_dialog()
         
-        if copies:
+        if copies and copies > 0:
             # Prepare image for printing
             print_image = self.image_processor.prepare_for_print(self.current_photo_path)
             if print_image:
@@ -1028,6 +1022,77 @@ class PhotoBoothApp:
                     messagebox.showerror("Error", "Printing failed!")
             else:
                 messagebox.showerror("Error", "Failed to prepare image for printing!")
+    
+    def create_print_dialog(self):
+        """Create a custom print dialog that works better on Raspberry Pi"""
+        # Create dialog window
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Print Copies")
+        dialog.geometry("400x200")
+        dialog.configure(bg='white')
+        dialog.resizable(False, False)
+        
+        # Center the dialog on screen
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Store result
+        result = None
+        
+        # Title label
+        title_label = tk.Label(
+            dialog,
+            text="How many copies would you like?",
+            font=('Arial', 16, 'bold'),
+            bg='white'
+        )
+        title_label.pack(pady=20)
+        
+        # Copies frame
+        copies_frame = tk.Frame(dialog, bg='white')
+        copies_frame.pack(pady=10)
+        
+        # Number buttons (1-5)
+        max_copies = self.config_manager.get("printing", "max_copies")
+        for i in range(1, min(max_copies + 1, 6)):  # Max 5 buttons
+            btn = tk.Button(
+                copies_frame,
+                text=str(i),
+                font=('Arial', 20, 'bold'),
+                width=3,
+                height=2,
+                bg='lightblue',
+                fg='black',
+                command=lambda x=i: self.set_dialog_result(dialog, x)
+            )
+            btn.pack(side='left', padx=5)
+        
+        # Button frame
+        button_frame = tk.Frame(dialog, bg='white')
+        button_frame.pack(pady=20)
+        
+        # Cancel button
+        cancel_btn = tk.Button(
+            button_frame,
+            text="Cancel",
+            font=('Arial', 14, 'bold'),
+            width=10,
+            height=2,
+            bg='gray',
+            fg='white',
+            command=lambda: self.set_dialog_result(dialog, None)
+        )
+        cancel_btn.pack(side='left', padx=10)
+        
+        # Wait for user interaction
+        dialog.wait_window()
+        
+        return getattr(dialog, 'result', None)
+    
+    def set_dialog_result(self, dialog, value):
+        """Set the result and close the dialog"""
+        dialog.result = value
+        dialog.destroy()
     
     def save_and_continue(self):
         # Cleanup old files
