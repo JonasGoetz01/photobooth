@@ -33,7 +33,6 @@ class ConfigManager:
             "printing": {
                 "default_copies": 1,
                 "max_copies": 5,
-                "quality": "high",
                 "paper_size": "4x6",
                 "printer_name": "Canon_Printer"
             },
@@ -344,11 +343,6 @@ class PrintManager:
             if media_size != "iso_a4_210x297mm":
                 options['media'] = media_size
             
-            # Add basic quality setting
-            try:
-                options['print-quality'] = '3'  # Draft quality (most compatible)
-            except:
-                pass  # Skip if not supported
             
             # Log the print options for debugging
             logging.info(f"Printing to {printer_name} with options: {options}")
