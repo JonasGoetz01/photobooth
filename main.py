@@ -463,6 +463,37 @@ class PrintManager:
         logging.warning(f"Job {job_id} monitoring timed out after {timeout} seconds")
         return False
     
+    def clear_print_queue(self, printer_name=None):
+        """Clear all pending print jobs for the printer"""
+        try:
+            if not printer_name:
+                printer_name = self.config.get("printing", "printer_name")
+            
+            # Get all jobs for this printer
+            jobs = self.conn.getJobs(which_jobs='not-completed', my_jobs=False)
+            cleared_jobs = []
+            
+            for job_id, job_info in jobs.items():
+                job_printer = job_info.get('printer-name', '')
+                if job_printer == printer_name:
+                    try:
+                        self.conn.cancelJob(job_id)
+                        cleared_jobs.append(job_id)
+                        logging.info(f"Canceled stuck job {job_id}")
+                    except Exception as e:
+                        logging.error(f"Failed to cancel job {job_id}: {e}")
+            
+            if cleared_jobs:
+                logging.info(f"Cleared {len(cleared_jobs)} stuck print jobs")
+                return True
+            else:
+                logging.info("No stuck print jobs found")
+                return False
+                
+        except Exception as e:
+            logging.error(f"Error clearing print queue: {e}")
+            return False
+    
     def get_cups_media_size(self, paper_size):
         """Convert paper size to CUPS media format"""
         size_map = {
@@ -744,6 +775,28 @@ class PhotoBoothApp:
         
         # Load available frames
         self.load_frame_options(frame_button_frame)
+        
+        # Printer maintenance section
+        maintenance_label = tk.Label(
+            self.settings_frame,
+            text="Printer Maintenance:",
+            font=('Arial', 18),
+            bg='white'
+        )
+        maintenance_label.pack(pady=(20, 10))
+        
+        # Clear print queue button
+        clear_queue_btn = tk.Button(
+            self.settings_frame,
+            text="Clear Print Queue",
+            font=('Arial', 14, 'bold'),
+            bg='orange',
+            fg='white',
+            width=20,
+            height=2,
+            command=self.clear_printer_queue
+        )
+        clear_queue_btn.pack(pady=5)
         
         # Back button
         tk.Button(
@@ -1231,6 +1284,17 @@ class PhotoBoothApp:
         messagebox.showinfo("Saved", "Photo saved successfully!")
         self.show_main_screen()
         
+    def clear_printer_queue(self):
+        """Clear print queue and show result"""
+        try:
+            success = self.print_manager.clear_print_queue()
+            if success:
+                messagebox.showinfo("Success", "Print queue cleared successfully!")
+            else:
+                messagebox.showinfo("Info", "No stuck print jobs found.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to clear print queue: {e}")
+    
     def show_settings(self):
         self.main_frame.pack_forget()
         self.settings_frame.pack(fill='both', expand=True)
