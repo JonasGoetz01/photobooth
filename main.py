@@ -300,6 +300,10 @@ class PrintManager:
                 logging.error("No CUPS connection available")
                 return False
             
+            # First, clear any stuck jobs to ensure clean state
+            logging.info("Clearing any stuck print jobs before printing...")
+            self.clear_print_queue()
+            
             # Check printer status before printing
             if not self.check_printer_ready():
                 logging.error("Printer is not ready for printing")
@@ -342,8 +346,11 @@ class PrintManager:
             
             # Try different approaches for Canon MG3600
             if "MG3600" in printer_name:
-                # First try: No page size at all - let printer auto-detect
-                logging.info("Using minimal options for Canon MG3600 - no page size specified")
+                # Try the most basic approach - just fit-to-page
+                options.update({
+                    'fit-to-page': 'true'  # Let printer handle sizing
+                })
+                logging.info("Using Canon MG3600 with fit-to-page option")
             
             
             # Log the print options for debugging
@@ -524,6 +531,19 @@ class PrintManager:
                 
         except Exception as e:
             logging.error(f"Error clearing print queue: {e}")
+            return False
+    
+    def clear_specific_job(self, job_id):
+        """Clear a specific job by ID"""
+        try:
+            if not self.conn:
+                return False
+            
+            self.conn.cancelJob(job_id)
+            logging.info(f"Cancelled specific job {job_id}")
+            return True
+        except Exception as e:
+            logging.error(f"Error cancelling job {job_id}: {e}")
             return False
     
     def get_cups_media_size(self, paper_size):
