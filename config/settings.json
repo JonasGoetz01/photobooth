@@ -15,8 +15,8 @@
         "default_copies": 1,
         "max_copies": 5,
         "quality": "high",
-        "paper_size": "A4",
-        "printer_name": "Canon_iR_ADV_C3922"
+        "paper_size": "4x6",
+        "printer_name": "Canon_MG3600_series"
     },
     "storage": {
         "max_local_photos": 100,
