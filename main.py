@@ -1,0 +1,1080 @@
+# main.py - Photo Booth Main Application
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog
+import cv2
+import threading
+import time
+import os
+import json
+import logging
+from datetime import datetime
+from PIL import Image, ImageTk, ImageDraw, ImageFont
+import cups
+import shutil
+from pathlib import Path
+
+class ConfigManager:
+    def __init__(self):
+        # Use relative path for config file to work on different systems
+        self.config_path = Path('./config/settings.json')
+        self.default_config = {
+            "camera": {
+                "resolution": [1920, 1080],
+                "preview_resolution": [1280, 720],
+                "fps": 30,
+                "device_id": 0
+            },
+            "ui": {
+                "fullscreen": False,
+                "button_size": "large",
+                "theme": "dark",
+                "countdown_time": 3
+            },
+            "printing": {
+                "default_copies": 1,
+                "max_copies": 5,
+                "quality": "high",
+                "paper_size": "4x6",
+                "printer_name": "Canon_Printer"
+            },
+            "storage": {
+                "max_local_photos": 100,
+                "auto_sync": True,
+                "originals_path": "./captured_photos/originals",
+                "framed_path": "./captured_photos/framed",
+                "sync_path": "./google_drive_sync"
+            },
+            "frames": {
+                "default_frame": "classic_frame.png",
+                "frames_path": "./assets/frames"
+            },
+            "logs": {
+                "log_path": "./logs/photobooth.log"
+            }
+        }
+        self.load_config()
+    
+    def load_config(self):
+        try:
+            if self.config_path.exists():
+                with open(self.config_path, 'r') as f:
+                    self.config = json.load(f)
+            else:
+                self.config = self.default_config.copy()
+                self.save_config()
+        except Exception as e:
+            logging.error(f"Error loading config: {e}")
+            self.config = self.default_config.copy()
+    
+    def save_config(self):
+        try:
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.config_path, 'w') as f:
+                json.dump(self.config, f, indent=4)
+        except Exception as e:
+            logging.error(f"Error saving config: {e}")
+    
+    def get(self, section, key=None):
+        if key:
+            return self.config.get(section, {}).get(key)
+        return self.config.get(section, {})
+    
+    def setup_logging(self):
+        """Configure logging based on config settings"""
+        log_path = self.get("logs", "log_path") or "./logs/photobooth.log"
+        
+        # Ensure log directory exists
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_path),
+                logging.StreamHandler()
+            ]
+        )
+
+class CameraManager:
+    def __init__(self, config_manager):
+        self.config = config_manager
+        self.cap = None
+        self.preview_running = False
+        self.current_frame = None
+        self.initialize_camera()
+    
+    def initialize_camera(self):
+        try:
+            device_id = self.config.get("camera", "device_id")
+            self.cap = cv2.VideoCapture(device_id)
+            
+            # Set camera properties
+            preview_res = self.config.get("camera", "preview_resolution")
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, preview_res[0])
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, preview_res[1])
+            self.cap.set(cv2.CAP_PROP_FPS, self.config.get("camera", "fps"))
+            
+            # Enable autofocus if available
+            self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
+            
+            logging.info("Camera initialized successfully")
+            return True
+        except Exception as e:
+            logging.error(f"Camera initialization failed: {e}")
+            return False
+    
+    def start_preview(self):
+        self.preview_running = True
+    
+    def stop_preview(self):
+        self.preview_running = False
+    
+    def get_frame(self):
+        if self.cap and self.cap.isOpened():
+            ret, frame = self.cap.read()
+            if ret:
+                self.current_frame = frame
+                return cv2.flip(frame, 1)  # Mirror the image
+        return None
+    
+    def capture_photo(self):
+        try:
+            if self.cap and self.cap.isOpened():
+                # Set high resolution for capture
+                capture_res = self.config.get("camera", "resolution")
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, capture_res[0])
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, capture_res[1])
+                
+                # Take the photo
+                ret, frame = self.cap.read()
+                if ret:
+                    # Flip the image horizontally (mirror effect)
+                    frame = cv2.flip(frame, 1)
+                    
+                    # Reset to preview resolution
+                    preview_res = self.config.get("camera", "preview_resolution")
+                    self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, preview_res[0])
+                    self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, preview_res[1])
+                    
+                    return frame
+        except Exception as e:
+            logging.error(f"Photo capture failed: {e}")
+        return None
+    
+    def release(self):
+        if self.cap:
+            self.cap.release()
+
+class ImageProcessor:
+    def __init__(self, config_manager):
+        self.config = config_manager
+        
+    def save_original(self, cv_image, filename):
+        try:
+            originals_path = Path(self.config.get("storage", "originals_path"))
+            originals_path.mkdir(parents=True, exist_ok=True)
+            
+            filepath = originals_path / filename
+            cv2.imwrite(str(filepath), cv_image)
+            
+            # Also save to sync folder
+            sync_path = Path(self.config.get("storage", "sync_path")) / "originals"
+            sync_path.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(filepath, sync_path / filename)
+            
+            return filepath
+        except Exception as e:
+            logging.error(f"Error saving original: {e}")
+            return None
+    
+    def apply_frame_and_save(self, cv_image, filename, frame_name=None):
+        try:
+            # Convert CV2 image to PIL
+            pil_image = Image.fromarray(cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB))
+            
+            # Load and apply frame
+            if frame_name:
+                frame_path = Path(self.config.get("frames", "frames_path")) / frame_name
+                if frame_path.exists():
+                    pil_image = self.apply_frame(pil_image, frame_path)
+            
+            # Save framed version
+            framed_path = Path(self.config.get("storage", "framed_path"))
+            framed_path.mkdir(parents=True, exist_ok=True)
+            
+            filepath = framed_path / filename
+            pil_image.save(filepath, "JPEG", quality=95)
+            
+            # Also save to sync folder
+            sync_path = Path(self.config.get("storage", "sync_path")) / "framed"
+            sync_path.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(filepath, sync_path / filename)
+            
+            return filepath, pil_image
+        except Exception as e:
+            logging.error(f"Error applying frame: {e}")
+            return None, None
+    
+    def apply_frame(self, image, frame_path):
+        try:
+            # Load frame
+            frame = Image.open(frame_path).convert("RGBA")
+            
+            # Resize image to fit within frame (assuming frame has transparent center)
+            img_width, img_height = image.size
+            frame_width, frame_height = frame.size
+            
+            # Calculate scaling to fit image in frame
+            scale = min(frame_width * 0.8 / img_width, frame_height * 0.8 / img_height)
+            new_width = int(img_width * scale)
+            new_height = int(img_height * scale)
+            
+            # Resize image
+            resized_image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            
+            # Create composite
+            composite = Image.new("RGBA", (frame_width, frame_height), (255, 255, 255, 255))
+            
+            # Center the image
+            x_offset = (frame_width - new_width) // 2
+            y_offset = (frame_height - new_height) // 2
+            composite.paste(resized_image, (x_offset, y_offset))
+            
+            # Apply frame
+            composite.paste(frame, (0, 0), frame)
+            
+            return composite.convert("RGB")
+        except Exception as e:
+            logging.error(f"Error applying frame overlay: {e}")
+            return image
+    
+    def prepare_for_print(self, image_path):
+        try:
+            # Open image and resize for 4x6 printing (300 DPI)
+            image = Image.open(image_path)
+            
+            # 4x6 inches at 300 DPI = 1200x1800 pixels
+            print_size = (1200, 1800)
+            
+            # Resize maintaining aspect ratio
+            image.thumbnail(print_size, Image.Resampling.LANCZOS)
+            
+            # Create white background
+            print_image = Image.new("RGB", print_size, (255, 255, 255))
+            
+            # Center the image
+            x_offset = (print_size[0] - image.size[0]) // 2
+            y_offset = (print_size[1] - image.size[1]) // 2
+            print_image.paste(image, (x_offset, y_offset))
+            
+            return print_image
+        except Exception as e:
+            logging.error(f"Error preparing image for print: {e}")
+            return None
+
+class PrintManager:
+    def __init__(self, config_manager):
+        self.config = config_manager
+        self.conn = None
+        self.setup_printer()
+    
+    def setup_printer(self):
+        try:
+            self.conn = cups.Connection()
+            printers = self.conn.getPrinters()
+            logging.info(f"Available printers: {list(printers.keys())}")
+            
+            # Log capabilities for the configured printer
+            printer_name = self.config.get("printing", "printer_name")
+            if printer_name in printers:
+                self.get_printer_capabilities(printer_name)
+            
+            return True
+        except Exception as e:
+            logging.error(f"Printer setup failed: {e}")
+            return False
+    
+    def print_image(self, image_path, copies=1):
+        try:
+            if not self.conn:
+                logging.error("No CUPS connection available")
+                return False
+            
+            # Validate image file exists and is readable
+            if not os.path.exists(image_path):
+                logging.error(f"Image file does not exist: {image_path}")
+                return False
+                
+            # Check file size
+            file_size = os.path.getsize(image_path)
+            logging.info(f"Image file size: {file_size} bytes")
+            
+            printer_name = self.config.get("printing", "printer_name")
+            printers = self.conn.getPrinters()
+            
+            # Use first available printer if configured printer not found
+            if printer_name not in printers:
+                if printers:
+                    printer_name = list(printers.keys())[0]
+                    logging.warning(f"Configured printer not found, using: {printer_name}")
+                else:
+                    logging.error("No printers available")
+                    return False
+            
+            # Get paper size from config and convert to CUPS format
+            paper_size = self.config.get("printing", "paper_size") or "A4"
+            media_size = self.get_cups_media_size(paper_size)
+            
+            # Print options - use more compatible settings
+            options = {
+                'copies': str(copies),
+                'media': media_size,
+                'print-quality': '4',  # Normal quality (more compatible)
+                'ColorModel': 'RGB',
+                'Resolution': '300dpi',
+                'orientation-requested': '3'  # Portrait
+            }
+            
+            # Log the print options for debugging
+            logging.info(f"Printing to {printer_name} with options: {options}")
+            logging.info(f"Image path: {image_path}")
+            
+            job_id = self.conn.printFile(printer_name, str(image_path), "PhotoBooth", options)
+            logging.info(f"Print job {job_id} submitted for {copies} copies")
+            
+            # Check job status immediately after submission
+            try:
+                job_attrs = self.conn.getJobAttributes(job_id)
+                job_state = job_attrs.get('job-state', 'unknown')
+                job_state_reasons = job_attrs.get('job-state-reasons', ['unknown'])
+                logging.info(f"Job {job_id} status: {job_state}, reasons: {job_state_reasons}")
+                
+                # If job is held or stopped, log the reason
+                if job_state in [4, 5, 8]:  # held, processing-stopped, aborted
+                    logging.warning(f"Print job {job_id} may have issues - state: {job_state}")
+                    
+            except Exception as job_e:
+                logging.warning(f"Could not check job status: {job_e}")
+            
+            return True
+            
+        except Exception as e:
+            logging.error(f"Printing failed: {e}")
+            import traceback
+            logging.error(f"Traceback: {traceback.format_exc()}")
+            return False
+    
+    def get_cups_media_size(self, paper_size):
+        """Convert paper size to CUPS media format"""
+        size_map = {
+            "A4": "iso_a4_210x297mm",
+            "4x6": "na_index-4x6_4x6in",
+            "Letter": "na_letter_8.5x11in",
+            "Legal": "na_legal_8.5x14in"
+        }
+        return size_map.get(paper_size, "iso_a4_210x297mm")
+    
+    def get_printer_status(self):
+        try:
+            if self.conn:
+                printers = self.conn.getPrinters()
+                return len(printers) > 0
+        except:
+            pass
+        return False
+    
+    def get_printer_capabilities(self, printer_name=None):
+        """Get printer capabilities for debugging"""
+        try:
+            if not self.conn:
+                return None
+            
+            if not printer_name:
+                printer_name = self.config.get("printing", "printer_name")
+            
+            printers = self.conn.getPrinters()
+            if printer_name in printers:
+                printer_info = printers[printer_name]
+                logging.info(f"Printer {printer_name} info: {printer_info}")
+                
+                # Get PPD attributes
+                ppd = self.conn.getPPD(printer_name)
+                if ppd:
+                    logging.info(f"PPD file for {printer_name}: {ppd}")
+                
+                return printer_info
+        except Exception as e:
+            logging.error(f"Error getting printer capabilities: {e}")
+        return None
+
+class FileManager:
+    def __init__(self, config_manager):
+        self.config = config_manager
+        self.setup_directories()
+    
+    def setup_directories(self):
+        try:
+            # Create all necessary directories
+            paths = [
+                self.config.get("storage", "originals_path"),
+                self.config.get("storage", "framed_path"),
+                self.config.get("storage", "sync_path") + "/originals",
+                self.config.get("storage", "sync_path") + "/framed",
+                "./logs"
+            ]
+            
+            for path in paths:
+                Path(path).mkdir(parents=True, exist_ok=True)
+                
+        except Exception as e:
+            logging.error(f"Directory setup failed: {e}")
+    
+    def cleanup_old_files(self):
+        try:
+            max_photos = self.config.get("storage", "max_local_photos")
+            
+            for folder in ["originals_path", "framed_path"]:
+                path = Path(self.config.get("storage", folder))
+                if path.exists():
+                    files = sorted(path.glob("*.jpg"), key=lambda x: x.stat().st_mtime)
+                    if len(files) > max_photos:
+                        for file in files[:-max_photos]:
+                            file.unlink()
+                            logging.info(f"Cleaned up old file: {file}")
+        except Exception as e:
+            logging.error(f"Cleanup failed: {e}")
+
+class PhotoBoothApp:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.config_manager = ConfigManager()
+        # Setup logging after config is loaded
+        self.config_manager.setup_logging()
+        self.camera_manager = CameraManager(self.config_manager)
+        self.image_processor = ImageProcessor(self.config_manager)
+        self.print_manager = PrintManager(self.config_manager)
+        self.file_manager = FileManager(self.config_manager)
+        
+        self.current_photo = None
+        self.current_photo_path = None
+        self.countdown_active = False
+        self.selected_frame = None
+        
+        self.setup_ui()
+        self.start_camera_preview()
+        
+    def setup_ui(self):
+        # Configure main window
+        self.root.title("Photo Booth")
+        self.root.configure(bg='black')
+        
+        if self.config_manager.get("ui", "fullscreen"):
+            self.root.attributes('-fullscreen', True)
+            self.root.bind('<Escape>', lambda e: self.root.quit())
+        else:
+            self.root.geometry("1920x1080")
+        
+        # Create main frame
+        self.main_frame = tk.Frame(self.root, bg='black')
+        self.main_frame.pack(fill='both', expand=True)
+        
+        # Camera preview label
+        self.camera_label = tk.Label(self.main_frame, bg='black')
+        self.camera_label.pack(fill='both', expand=True)
+        
+        # Overlay frame for buttons
+        self.overlay_frame = tk.Frame(self.main_frame, bg='black')
+        self.overlay_frame.place(relx=0.5, rely=0.5, anchor='center')
+        
+        # Create button image for overlay
+        try:
+            self.button_image = self.create_button_image("TAKE PHOTO", 220)
+        except Exception as e:
+            logging.error(f"Failed to create button image: {e}")
+            self.button_image = None
+        
+        # Bind click event to camera label for button interaction
+        self.camera_label.bind('<Button-1>', self.on_camera_click)
+        self.camera_label.configure(cursor='hand2')  # Show it's clickable
+        
+        # Initialize button as visible (countdown_image starts as None)
+        
+        # Settings button (transparent style)
+        settings_image = self.create_settings_button_image()
+        settings_photo = ImageTk.PhotoImage(settings_image)
+        
+        self.settings_button = tk.Label(
+            self.main_frame,
+            image=settings_photo,
+            bg='black',
+            cursor='hand2'
+        )
+        self.settings_button.image = settings_photo  # Keep reference
+        self.settings_button.bind('<Button-1>', lambda e: self.show_settings())
+        self.settings_button.place(x=20, y=20)
+        
+        # Status frame
+        self.status_frame = tk.Frame(self.main_frame, bg='black')
+        self.status_frame.place(relx=1.0, rely=0.0, anchor='ne', x=-20, y=20)
+        
+        # Printer status
+        self.printer_status = tk.Label(
+            self.status_frame,
+            text="🖨️ Ready" if self.print_manager.get_printer_status() else "🖨️ Offline",
+            font=('Arial', 16),
+            bg='black',
+            fg='green' if self.print_manager.get_printer_status() else 'red'
+        )
+        self.printer_status.pack()
+        
+        # Variables for countdown overlay
+        self.countdown_number = None
+        self.countdown_image = None
+        
+        # Variables for button overlay
+        self.button_image = None
+        self.button_position = None
+        
+        # Initial state set
+        
+        # Create hidden frames for different screens
+        self.create_photo_review_screen()
+        self.create_settings_screen()
+        
+    def create_photo_review_screen(self):
+        self.review_frame = tk.Frame(self.root, bg='black')
+        
+        # Photo display
+        self.review_photo_label = tk.Label(self.review_frame, bg='black')
+        self.review_photo_label.pack(pady=20)
+        
+        # Button frame
+        button_frame = tk.Frame(self.review_frame, bg='black')
+        button_frame.pack(pady=20)
+        
+        # Retake button
+        tk.Button(
+            button_frame,
+            text="🔄 RETAKE",
+            font=('Arial', 20, 'bold'),
+            bg='orange',
+            fg='white',
+            width=12,
+            height=2,
+            command=self.retake_photo
+        ).pack(side='left', padx=10)
+        
+        # Print button
+        tk.Button(
+            button_frame,
+            text="🖨️ PRINT",
+            font=('Arial', 20, 'bold'),
+            bg='green',
+            fg='white',
+            width=12,
+            height=2,
+            command=self.show_print_options
+        ).pack(side='left', padx=10)
+        
+        # Save & Continue button
+        tk.Button(
+            button_frame,
+            text="✅ SAVE",
+            font=('Arial', 20, 'bold'),
+            bg='blue',
+            fg='white',
+            width=12,
+            height=2,
+            command=self.save_and_continue
+        ).pack(side='left', padx=10)
+        
+    def create_settings_screen(self):
+        self.settings_frame = tk.Frame(self.root, bg='white')
+        
+        # Title
+        tk.Label(
+            self.settings_frame,
+            text="Settings",
+            font=('Arial', 32, 'bold'),
+            bg='white'
+        ).pack(pady=20)
+        
+        # Frame selection
+        frame_label = tk.Label(
+            self.settings_frame,
+            text="Select Frame:",
+            font=('Arial', 18),
+            bg='white'
+        )
+        frame_label.pack(pady=10)
+        
+        # Frame selection buttons
+        frame_button_frame = tk.Frame(self.settings_frame, bg='white')
+        frame_button_frame.pack(pady=10)
+        
+        # Load available frames
+        self.load_frame_options(frame_button_frame)
+        
+        # Back button
+        tk.Button(
+            self.settings_frame,
+            text="← BACK",
+            font=('Arial', 20, 'bold'),
+            bg='gray',
+            fg='white',
+            width=12,
+            height=2,
+            command=self.show_main_screen
+        ).pack(pady=20)
+        
+    def load_frame_options(self, parent):
+        frames_path = Path(self.config_manager.get("frames", "frames_path"))
+        
+        # No frame option
+        tk.Button(
+            parent,
+            text="No Frame",
+            font=('Arial', 14),
+            bg='lightgray',
+            width=15,
+            height=2,
+            command=lambda: self.select_frame(None)
+        ).pack(side='left', padx=5)
+        
+        # Load frame files
+        if frames_path.exists():
+            for frame_file in frames_path.glob("*.png"):
+                frame_name = frame_file.stem.replace('_', ' ').title()
+                tk.Button(
+                    parent,
+                    text=frame_name,
+                    font=('Arial', 14),
+                    bg='lightblue',
+                    width=15,
+                    height=2,
+                    command=lambda f=frame_file.name: self.select_frame(f)
+                ).pack(side='left', padx=5)
+    
+    def select_frame(self, frame_file):
+        self.selected_frame = frame_file
+        logging.info(f"Selected frame: {frame_file}")
+    
+    def create_countdown_image(self, number):
+        """Create a circular countdown image with transparent background"""
+        # Create a large image for the circle
+        size = 300
+        image = Image.new("RGBA", (size, size), (0, 0, 0, 0))  # Transparent background
+        draw = ImageDraw.Draw(image)
+        
+        # Draw semi-transparent circle
+        circle_color = (30, 100, 200, 150)  # Blueish with transparency
+        circle_outline = (255, 255, 255, 200)  # White outline
+        margin = 20
+        draw.ellipse([margin, margin, size-margin, size-margin], 
+                    fill=circle_color, outline=circle_outline, width=8)
+        
+        # Add the number in the center
+        try:
+            # Try to use a better font if available
+            font = ImageFont.truetype("Arial", 120)
+        except:
+            # Fallback to default font
+            font = ImageFont.load_default()
+        
+        # Get text dimensions for centering
+        text = str(number)
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        
+        # Center the text
+        x = (size - text_width) // 2
+        y = (size - text_height) // 2
+        
+        # Draw text with shadow for better visibility
+        shadow_offset = 3
+        draw.text((x + shadow_offset, y + shadow_offset), text, font=font, fill=(0, 0, 0, 255))
+        draw.text((x, y), text, font=font, fill=(255, 255, 255, 255))
+        
+        return image
+    
+    def create_smile_overlay(self):
+        """Create a 'SMILE!' overlay with circular background"""
+        size = 300
+        image = Image.new("RGBA", (size, size), (0, 0, 0, 0))  # Transparent background
+        draw = ImageDraw.Draw(image)
+        
+        # Draw semi-transparent circle (different color for smile)
+        circle_color = (0, 150, 0, 180)  # Green with transparency
+        circle_outline = (255, 255, 255, 255)  # White outline
+        margin = 20
+        draw.ellipse([margin, margin, size-margin, size-margin], 
+                    fill=circle_color, outline=circle_outline, width=8)
+        
+        # Add "SMILE!" text
+        try:
+            font = ImageFont.truetype("Arial", 60)
+        except:
+            font = ImageFont.load_default()
+        
+        text = "SMILE!"
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        
+        x = (size - text_width) // 2
+        y = (size - text_height) // 2
+        
+        # Draw text with shadow
+        shadow_offset = 2
+        draw.text((x + shadow_offset, y + shadow_offset), text, font=font, fill=(0, 0, 0, 255))
+        draw.text((x, y), text, font=font, fill=(255, 255, 255, 255))
+        
+        return image
+    
+    def create_button_image(self, text, size=200):
+        """Create a circular button image with transparent background"""
+        image = Image.new("RGBA", (size, size), (0, 0, 0, 0))  # Transparent background
+        draw = ImageDraw.Draw(image)
+        
+        # Draw semi-transparent circle (same style as countdown)
+        circle_color = (30, 100, 200, 150)  # Blueish with transparency
+        circle_outline = (255, 255, 255, 200)  # White outline
+        margin = 10
+        draw.ellipse([margin, margin, size-margin, size-margin], 
+                    fill=circle_color, outline=circle_outline, width=6)
+        
+        # Add the text
+        try:
+            font = ImageFont.truetype("Arial", 28)  # Increased font size
+        except Exception as e:
+            logging.warning(f"Could not load Arial font, using default: {e}")
+            try:
+                font = ImageFont.load_default()
+            except Exception as e2:
+                logging.error(f"Could not load default font: {e2}")
+                font = None
+        
+        # Get text dimensions for centering
+        if font:
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+        else:
+            # Fallback dimensions if no font
+            text_width = len(text) * 12
+            text_height = 20
+        
+        x = (size - text_width) // 2
+        y = (size - text_height) // 2
+        
+        # Draw text with shadow
+        shadow_offset = 2
+        if font:
+            draw.text((x + shadow_offset, y + shadow_offset), text, font=font, fill=(0, 0, 0, 200))
+            draw.text((x, y), text, font=font, fill=(255, 255, 255, 255))
+        else:
+            # Fallback without font
+            draw.text((x + shadow_offset, y + shadow_offset), text, fill=(0, 0, 0, 200))
+            draw.text((x, y), text, fill=(255, 255, 255, 255))
+        
+        return image
+    
+    def create_settings_button_image(self, size=100):
+        """Create a settings text with transparent background"""
+        image = Image.new("RGBA", (size, size), (0, 0, 0, 0))  # Transparent background
+        draw = ImageDraw.Draw(image)
+        
+        # Just draw the settings text without background
+        try:
+            font = ImageFont.truetype("Arial", 16)
+        except Exception as e:
+            try:
+                font = ImageFont.load_default()
+            except Exception as e2:
+                font = None
+        
+        # Center the settings text
+        text = "Settings"
+        if font:
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+        else:
+            text_width = 60  # Longer text needs more width
+            text_height = 20
+        
+        x = (size - text_width) // 2
+        y = (size - text_height) // 2
+        
+        # Draw gear icon with shadow for visibility
+        shadow_offset = 1
+        if font:
+            draw.text((x + shadow_offset, y + shadow_offset), text, font=font, fill=(0, 0, 0, 150))
+            draw.text((x, y), text, font=font, fill=(200, 200, 200, 255))
+        else:
+            draw.text((x + shadow_offset, y + shadow_offset), text, fill=(0, 0, 0, 150))
+            draw.text((x, y), text, fill=(200, 200, 200, 255))
+        
+        return image
+        
+    def on_camera_click(self, event):
+        """Handle clicks on the camera preview to detect button clicks"""
+        if hasattr(self, 'button_image_position') and self.button_image_position is not None and self.countdown_image is None:
+            # Get the actual label size
+            label_width = self.camera_label.winfo_width()
+            label_height = self.camera_label.winfo_height()
+            
+            # Get the image size that was displayed
+            if hasattr(self, 'current_image_size') and self.current_image_size:
+                image_width, image_height = self.current_image_size
+                
+                # Calculate scaling and offset for the image within the label
+                # The image is centered in the label, so calculate the offset
+                x_offset = (label_width - image_width) // 2
+                y_offset = (label_height - image_height) // 2
+                
+                # Convert click coordinates from label space to image space
+                image_click_x = event.x - x_offset
+                image_click_y = event.y - y_offset
+                
+                # Get button bounds in image coordinates
+                x1, y1, x2, y2 = self.button_image_position
+                
+                # Check if click is within button bounds in image coordinates
+                if x1 <= image_click_x <= x2 and y1 <= image_click_y <= y2:
+                    self.start_countdown()
+        
+    def start_camera_preview(self):
+        self.camera_manager.start_preview()
+        self.update_camera_preview()
+        
+    def update_camera_preview(self):
+        if self.camera_manager.preview_running:
+            frame = self.camera_manager.get_frame()
+            if frame is not None:
+                # Convert to RGB and resize for display
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                pil_image = Image.fromarray(rgb_frame)
+                
+                # Resize to fit screen
+                display_size = (1280, 720)
+                pil_image.thumbnail(display_size, Image.Resampling.LANCZOS)
+                
+                # Create a copy for overlays
+                display_image = pil_image.copy()
+                
+                # If countdown is active, overlay the countdown
+                if self.countdown_image is not None:
+                    # Calculate position to center the countdown overlay
+                    overlay_size = self.countdown_image.size
+                    image_size = display_image.size
+                    
+                    x = (image_size[0] - overlay_size[0]) // 2
+                    y = (image_size[1] - overlay_size[1]) // 2
+                    
+                    # Paste the countdown overlay with transparency
+                    display_image.paste(self.countdown_image, (x, y), self.countdown_image)
+                
+                                # If button should be shown, overlay the button
+                # Ensure button image exists
+                if not hasattr(self, 'button_image') or self.button_image is None:
+                    self.button_image = self.create_button_image("TAKE PHOTO", 220)
+                    
+                button_should_show = (self.button_image is not None and 
+                                    self.countdown_image is None)
+                
+                if button_should_show:
+                    # Calculate position to center the button overlay
+                    button_size = self.button_image.size
+                    image_size = display_image.size
+                    
+                    x = (image_size[0] - button_size[0]) // 2
+                    y = (image_size[1] - button_size[1]) // 2
+                    
+                    # Store both image coordinates and widget coordinates for click detection
+                    self.button_image_position = (x, y, x + button_size[0], y + button_size[1])
+                    self.current_image_size = image_size
+                    
+                    # Paste the button overlay with transparency
+                    display_image.paste(self.button_image, (x, y), self.button_image)
+                    
+ 
+                else:
+                    # Clear button position when not showing
+                    self.button_image_position = None
+                    self.current_image_size = None
+                    
+
+                
+                pil_image = display_image
+                
+                # Convert to PhotoImage
+                photo = ImageTk.PhotoImage(pil_image)
+                self.camera_label.configure(image=photo)
+                self.camera_label.image = photo
+                
+        # Schedule next update
+        self.root.after(33, self.update_camera_preview)  # ~30 FPS
+        
+    def start_countdown(self):
+        if self.countdown_active:
+            return
+            
+        self.countdown_active = True
+        # Button will be hidden automatically when countdown starts (countdown_image is not None)
+        
+        countdown_time = self.config_manager.get("ui", "countdown_time")
+        
+        def countdown(count):
+            if count > 0:
+                # Set countdown image for overlay
+                self.countdown_image = self.create_countdown_image(count)
+                self.root.after(1000, lambda: countdown(count - 1))
+            else:
+                # Show "SMILE!" message briefly
+                self.countdown_image = self.create_smile_overlay()
+                
+                # Take the photo after a brief delay
+                self.root.after(800, self.capture_photo)
+        
+        countdown(countdown_time)
+        
+    def capture_photo(self):
+        try:
+            # Clear countdown overlay
+            self.countdown_image = None
+            
+            # Capture the photo
+            cv_image = self.camera_manager.capture_photo()
+            
+            if cv_image is not None:
+                # Generate filename
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"photo_{timestamp}.jpg"
+                
+                # Save original
+                original_path = self.image_processor.save_original(cv_image, filename)
+                
+                # Apply frame and save
+                framed_path, pil_image = self.image_processor.apply_frame_and_save(
+                    cv_image, f"framed_{filename}", self.selected_frame
+                )
+                
+                self.current_photo = pil_image if pil_image else Image.fromarray(cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB))
+                self.current_photo_path = framed_path if framed_path else original_path
+                
+                # Show photo review
+                self.show_photo_review()
+                
+                logging.info(f"Photo captured: {filename}")
+            else:
+                messagebox.showerror("Error", "Failed to capture photo!")
+                self.reset_capture_button()
+                
+        except Exception as e:
+            logging.error(f"Photo capture error: {e}")
+            messagebox.showerror("Error", f"Photo capture failed: {str(e)}")
+            self.reset_capture_button()
+        
+        self.countdown_active = False
+        
+    def show_photo_review(self):
+        # Hide main screen
+        self.main_frame.pack_forget()
+        
+        # Display captured photo
+        if self.current_photo:
+            # Resize for display
+            display_photo = self.current_photo.copy()
+            display_photo.thumbnail((800, 600), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(display_photo)
+            
+            self.review_photo_label.configure(image=photo)
+            self.review_photo_label.image = photo
+        
+        # Show review screen
+        self.review_frame.pack(fill='both', expand=True)
+        
+    def retake_photo(self):
+        self.show_main_screen()
+        
+    def show_print_options(self):
+        if not self.current_photo_path:
+            messagebox.showerror("Error", "No photo to print!")
+            return
+            
+        # Ask for number of copies
+        copies = simpledialog.askinteger(
+            "Print Copies",
+            "How many copies would you like?",
+            minvalue=1,
+            maxvalue=self.config_manager.get("printing", "max_copies"),
+            initialvalue=1
+        )
+        
+        if copies:
+            # Prepare image for printing
+            print_image = self.image_processor.prepare_for_print(self.current_photo_path)
+            if print_image:
+                # Save print-ready version
+                print_path = self.current_photo_path.parent / f"print_{self.current_photo_path.name}"
+                print_image.save(print_path, "JPEG", quality=95)
+                
+                # Send to printer
+                if self.print_manager.print_image(print_path, copies):
+                    messagebox.showinfo("Success", f"Printing {copies} copies!")
+                else:
+                    messagebox.showerror("Error", "Printing failed!")
+            else:
+                messagebox.showerror("Error", "Failed to prepare image for printing!")
+    
+    def save_and_continue(self):
+        # Cleanup old files
+        self.file_manager.cleanup_old_files()
+        
+        messagebox.showinfo("Saved", "Photo saved successfully!")
+        self.show_main_screen()
+        
+    def show_settings(self):
+        self.main_frame.pack_forget()
+        self.settings_frame.pack(fill='both', expand=True)
+        
+    def show_main_screen(self):
+        # Hide other screens
+        self.review_frame.pack_forget()
+        self.settings_frame.pack_forget()
+        
+        # Reset capture button
+        self.reset_capture_button()
+        
+        # Show main screen
+        self.main_frame.pack(fill='both', expand=True)
+        
+    def reset_capture_button(self):
+        # Clear countdown overlay if visible
+        self.countdown_image = None
+        self.countdown_active = False
+        
+        # Button will be shown automatically when countdown_image is None and countdown_active is False
+        
+    def run(self):
+        try:
+            logging.info("Photo Booth application started")
+            self.root.mainloop()
+        except KeyboardInterrupt:
+            logging.info("Application interrupted by user")
+        finally:
+            self.cleanup()
+            
+    def cleanup(self):
+        logging.info("Cleaning up resources...")
+        self.camera_manager.stop_preview()
+        self.camera_manager.release()
+
+def main():
+    app = PhotoBoothApp()
+    app.run()
+
+if __name__ == "__main__":
+    main()

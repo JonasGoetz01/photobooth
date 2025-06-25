@@ -1,0 +1,35 @@
+{
+    "camera": {
+        "resolution": [1920, 1080],
+        "preview_resolution": [1280, 720],
+        "fps": 30,
+        "device_id": 0
+    },
+    "ui": {
+        "fullscreen": false,
+        "button_size": "large",
+        "theme": "dark",
+        "countdown_time": 3
+    },
+    "printing": {
+        "default_copies": 1,
+        "max_copies": 5,
+        "quality": "high",
+        "paper_size": "A4",
+        "printer_name": "Canon_iR_ADV_C3922"
+    },
+    "storage": {
+        "max_local_photos": 100,
+        "auto_sync": true,
+        "originals_path": "./captured_photos/originals",
+        "framed_path": "./captured_photos/framed",
+        "sync_path": "./google_drive_sync"
+    },
+    "frames": {
+        "default_frame": "classic_frame.png",
+        "frames_path": "./assets/frames"
+    },
+    "logs": {
+        "log_path": "./logs/photobooth.log"
+    }
+} 
