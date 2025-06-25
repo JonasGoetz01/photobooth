@@ -300,6 +300,11 @@ class PrintManager:
                 logging.error("No CUPS connection available")
                 return False
             
+            # Check printer status before printing
+            if not self.check_printer_ready():
+                logging.error("Printer is not ready for printing")
+                return False
+            
             # Validate image file exists and is readable
             if not os.path.exists(image_path):
                 logging.error(f"Image file does not exist: {image_path}")
@@ -325,15 +330,25 @@ class PrintManager:
             paper_size = self.config.get("printing", "paper_size") or "A4"
             media_size = self.get_cups_media_size(paper_size)
             
-            # Print options - use more compatible settings
+            # # For Canon MG3600 series, default to A4 if 4x6 is configured
+            # if "MG3600" in printer_name and paper_size == "4x6":
+            #     logging.info("Canon MG3600 detected, using A4 instead of 4x6 for better compatibility")
+            #     media_size = "iso_a4_210x297mm"
+            
+            # Print options - simplified for better compatibility
             options = {
-                'copies': str(copies),
-                'media': media_size,
-                'print-quality': '4',  # Normal quality (more compatible)
-                'ColorModel': 'RGB',
-                'Resolution': '300dpi',
-                'orientation-requested': '3'  # Portrait
+                'copies': str(copies)
             }
+            
+            # Only add media size if it's not the default
+            if media_size != "iso_a4_210x297mm":
+                options['media'] = media_size
+            
+            # Add basic quality setting
+            try:
+                options['print-quality'] = '3'  # Draft quality (most compatible)
+            except:
+                pass  # Skip if not supported
             
             # Log the print options for debugging
             logging.info(f"Printing to {printer_name} with options: {options}")
@@ -349,9 +364,31 @@ class PrintManager:
                 job_state_reasons = job_attrs.get('job-state-reasons', ['unknown'])
                 logging.info(f"Job {job_id} status: {job_state}, reasons: {job_state_reasons}")
                 
-                # If job is held or stopped, log the reason
+                # Decode job state for better debugging
+                state_meanings = {
+                    3: "pending",
+                    4: "held", 
+                    5: "processing-stopped",
+                    6: "canceled",
+                    7: "aborted",
+                    8: "completed"
+                }
+                state_meaning = state_meanings.get(job_state, f"unknown({job_state})")
+                logging.info(f"Job {job_id} state meaning: {state_meaning}")
+                
+                # If job is held or stopped, log detailed reason and try to get more info
                 if job_state in [4, 5, 8]:  # held, processing-stopped, aborted
-                    logging.warning(f"Print job {job_id} may have issues - state: {job_state}")
+                    logging.warning(f"Print job {job_id} may have issues - state: {job_state} ({state_meaning})")
+                    logging.warning(f"Job state reasons: {job_state_reasons}")
+                    
+                    # Get more printer status info
+                    printers = self.conn.getPrinters()
+                    if printer_name in printers:
+                        printer_state = printers[printer_name].get('printer-state', 'unknown')
+                        printer_reasons = printers[printer_name].get('printer-state-reasons', ['unknown'])
+                        logging.warning(f"Printer {printer_name} state: {printer_state}, reasons: {printer_reasons}")
+                    
+                    return False  # Indicate failure for problematic states
                     
             except Exception as job_e:
                 logging.warning(f"Could not check job status: {job_e}")
@@ -373,6 +410,37 @@ class PrintManager:
             "Legal": "na_legal_8.5x14in"
         }
         return size_map.get(paper_size, "iso_a4_210x297mm")
+    
+    def check_printer_ready(self):
+        """Check if printer is ready to accept jobs"""
+        try:
+            printer_name = self.config.get("printing", "printer_name")
+            printers = self.conn.getPrinters()
+            
+            if printer_name not in printers:
+                logging.error(f"Printer {printer_name} not found")
+                return False
+            
+            printer_info = printers[printer_name]
+            printer_state = printer_info.get('printer-state', 0)
+            printer_reasons = printer_info.get('printer-state-reasons', [])
+            
+            # Log printer status
+            state_meanings = {3: "idle", 4: "printing", 5: "stopped"}
+            state_meaning = state_meanings.get(printer_state, f"unknown({printer_state})")
+            logging.info(f"Printer {printer_name} state: {printer_state} ({state_meaning})")
+            logging.info(f"Printer reasons: {printer_reasons}")
+            
+            # Check if printer is in a good state (idle or printing)
+            if printer_state in [3, 4]:  # idle or printing
+                return True
+            else:
+                logging.warning(f"Printer {printer_name} not ready - state: {printer_state}, reasons: {printer_reasons}")
+                return False
+                
+        except Exception as e:
+            logging.error(f"Error checking printer status: {e}")
+            return False
     
     def get_printer_status(self):
         try:
